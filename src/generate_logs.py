@@ -26,6 +26,7 @@ events_anomaly = [
     "Port scan detected",
     "Multiple failed attempts",
     "Suspicious file access",
+    ""
 ]
 
 logs = []
