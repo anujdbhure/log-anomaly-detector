@@ -9,7 +9,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 # --- Load data ---
-matrix = pd.read_csv("HDFS_v1/preprocessed/Event_occurrence_matrix.csv")
+matrix = pd.read_csv("../data/Event_occurrence_matrix.csv") if False else pd.read_csv("HDFS_v1/preprocessed/Event_occurrence_matrix.csv")
 feature_cols = [col for col in matrix.columns if col.startswith("E")]
 X = matrix[feature_cols]
 y = (matrix["Label"] == "Fail").astype(int)
@@ -18,53 +18,82 @@ y = (matrix["Label"] == "Fail").astype(int)
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
+# -----------------------------------------------
+# Algorithm 1: Isolation Forest
+# Unsupervised tree-based anomaly detection
+# Anomalies = isolated in fewer splits (shallower)
+# -----------------------------------------------
 print("Training Isolation Forest...")
 IF = IsolationForest(n_estimators=100, contamination=0.03, random_state=42, n_jobs=-1)
 IF.fit(X_scaled)
 if_scores = -IF.decision_function(X_scaled)  # higher = more anomalous
 
-# LOF removed — performs poorly on duplicate-heavy HDFS event counts
+# -----------------------------------------------
+# Algorithm 2: Local Outlier Factor (LOF)
+# Density-based: compares local density of a point
+# to its neighbors. Sparse = anomalous.
+# Note: struggles with duplicate-heavy count data
+# -----------------------------------------------
+print("Training Local Outlier Factor...")
+LOF = LocalOutlierFactor(n_neighbors=50, contamination=0.03, novelty=False, n_jobs=-1)
+lof_preds = LOF.fit_predict(X_scaled)
+lof_scores = -LOF.negative_outlier_factor_  # higher = more anomalous
+
+# -----------------------------------------------
+# Algorithm 3: One-Class SVM
+# Learns a boundary around normal data.
+# Anything outside boundary = anomaly.
+# Uses 50K sample due to computational limits.
+# -----------------------------------------------
 print("Training One-Class SVM (this may take a few minutes)...")
-# Use a sample for OCSVM - it doesn't scale well to 575K rows
 sample_size = 50000
 idx = np.random.RandomState(42).choice(len(X_scaled), sample_size, replace=False)
 X_sample = X_scaled[idx]
-
 OCSVM = OneClassSVM(kernel='rbf', nu=0.03)
 OCSVM.fit(X_sample)
 ocsvm_scores = -OCSVM.decision_function(X_scaled)  # higher = more anomalous
 
 print("Building ensemble...")
-# --- Normalize each score to 0-1 range before combining ---
+
+# --- Normalize each score to 0-1 before combining ---
 def normalize(scores):
     return (scores - scores.min()) / (scores.max() - scores.min())
 
-if_norm = normalize(if_scores)
-# lof_norm removed
+if_norm   = normalize(if_scores)
+lof_norm  = normalize(lof_scores)
 ocsvm_norm = normalize(ocsvm_scores)
 
-# --- Weighted ensemble score ---
-# IF gets highest weight since it performed best alone
-ensemble_score = 0.65 * if_norm + 0.35 * ocsvm_norm
-# --- Threshold at top 3% (our contamination estimate) ---
+# -----------------------------------------------
+# Weighted Ensemble Score
+# IF gets highest weight — best individual performance
+# LOF and OCSVM contribute as secondary signals
+# -----------------------------------------------
+ensemble_score = 0.6 * if_norm + 0.25 * lof_norm + 0.15 * ocsvm_norm
+
+# --- Threshold at top 3% (contamination estimate) ---
 threshold = np.percentile(ensemble_score, 97)
 preds = (ensemble_score >= threshold).astype(int)
 
-# --- Evaluate ---
-p = precision_score(y, preds)
-r = recall_score(y, preds)
-f1 = f1_score(y, preds)
+# --- Individual algorithm predictions for comparison ---
+if_preds   = np.where(IF.predict(X_scaled) == -1, 1, 0)
+lof_preds_binary = np.where(lof_preds == -1, 1, 0)
 
-print("\n" + "=" * 40)
-print("HDFS — Ensemble (IF + LOF + OCSVM)")
-print("=" * 40)
-print(f"Precision: {p:.3f}")
-print(f"Recall:    {r:.3f}")
-print(f"F1 Score:  {f1:.3f}")
-print(f"\nTotal anomalies detected: {preds.sum()}")
-print(f"Total actual anomalies:   {y.sum()}")
+# --- Evaluate all three + ensemble ---
+print("\n" + "=" * 50)
+print(f"{'Method':<30}{'Precision':<12}{'Recall':<12}{'F1':<10}")
+print("-" * 50)
 
-# --- Confusion Matrix ---
+for name, p in [("Isolation Forest", if_preds),
+                ("Local Outlier Factor", lof_preds_binary),
+                ("Ensemble (IF+LOF+OCSVM)", preds)]:
+    print(f"{name:<30}"
+          f"{precision_score(y, p):<12.3f}"
+          f"{recall_score(y, p):<12.3f}"
+          f"{f1_score(y, p):<10.3f}")
+
+print("=" * 50)
+
+# --- Confusion Matrix for Ensemble ---
 cm = confusion_matrix(y, preds)
 plt.figure(figsize=(6, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Greens',
@@ -72,15 +101,7 @@ sns.heatmap(cm, annot=True, fmt='d', cmap='Greens',
             yticklabels=["Normal", "Anomaly"])
 plt.xlabel("Predicted")
 plt.ylabel("Actual")
-plt.title("HDFS — Confusion Matrix (Ensemble)")
+plt.title("HDFS — Confusion Matrix (Ensemble: IF + LOF + OCSVM)")
 plt.tight_layout()
-plt.savefig("hdfs_ensemble_confusion_matrix.png")
-print("Confusion matrix saved.")
-
-# --- Comparison Summary ---
-print("\n" + "=" * 40)
-print("COMPARISON SUMMARY")
-print("=" * 40)
-print(f"{'Method':<25}{'F1':<10}")
-print(f"{'Isolation Forest':<25}{0.663:<10.3f}")
-print(f"{'Ensemble (IF+LOF+OCSVM)':<25}{f1:<10.3f}")
+plt.savefig("outputs/hdfs_ensemble_confusion_matrix.png")
+print("\nConfusion matrix saved.")
